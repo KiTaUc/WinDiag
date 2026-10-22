@@ -3,6 +3,7 @@
 #define WINVER 0x0601
 
 #include <windows.h>
+#include <winioctl.h>
 #include <tlhelp32.h>
 #include <psapi.h>
 #include <pdh.h>
@@ -360,6 +361,175 @@ static void scan_event_channel(const char *channel) {
     CloseEventLog(log);
 }
 
+static void report_usb_volume(DWORD disk_index, wchar_t letter) {
+    wchar_t root[4] = { letter, L':', L'\\', L'\0' };
+    wchar_t volume_path[7] = { L'\\', L'\\', L'.', L'\\', letter, L':', L'\0' };
+    HANDLE volume = CreateFileW(volume_path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                NULL, OPEN_EXISTING, 0, NULL);
+    if (volume == INVALID_HANDLE_VALUE) return;
+
+    STORAGE_DEVICE_NUMBER number;
+    DWORD bytes = 0;
+    BOOL matched = DeviceIoControl(volume, IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                                   NULL, 0, &number, sizeof(number), &bytes, NULL);
+    CloseHandle(volume);
+    if (!matched || number.DeviceNumber != disk_index) return;
+
+    wchar_t fs_name[64] = {0};
+    DWORD fs_flags = 0;
+    ULARGE_INTEGER available, total, total_free;
+    if (GetVolumeInformationW(root, NULL, 0, NULL, NULL, &fs_flags,
+                              fs_name, (DWORD)(sizeof(fs_name)/sizeof(fs_name[0])))) {
+        char fs_utf8[256] = "неизвестно";
+        WideCharToMultiByte(CP_UTF8, 0, fs_name, -1, fs_utf8,
+                            (int)sizeof(fs_utf8), NULL, NULL);
+        if (GetDiskFreeSpaceExW(root, &available, &total, &total_free)) {
+            report("Том %c: файловая система %s; доступно %.1f ГБ из %.1f ГБ.",
+                   (char)letter, fs_utf8,
+                   (double)available.QuadPart/(1024.0*1024.0*1024.0),
+                   (double)total.QuadPart/(1024.0*1024.0*1024.0));
+        } else {
+            report("Том %c: файловая система %s; объём прочитать не удалось (код %lu).",
+                   (char)letter, fs_utf8, GetLastError());
+        }
+        if (fs_flags & FILE_READ_ONLY_VOLUME)
+            report("Том %c: Windows сообщает, что файловая система доступна только для чтения.", (char)letter);
+    } else {
+        DWORD error = GetLastError();
+        report("Том %c: Windows не смогла прочитать файловую систему (код %lu).", (char)letter, error);
+        report("Если на томе важны файлы, не форматируйте его и не запускайте исправление с /f до копирования или восстановления данных.");
+        return;
+    }
+
+    HANDLE fs_volume = CreateFileW(volume_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                   NULL, OPEN_EXISTING, 0, NULL);
+    if (fs_volume != INVALID_HANDLE_VALUE) {
+        DWORD dirty_flags = 0;
+        if (DeviceIoControl(fs_volume, FSCTL_IS_VOLUME_DIRTY, NULL, 0,
+                            &dirty_flags, sizeof(dirty_flags), &bytes, NULL)) {
+            if (dirty_flags & 1) {
+                report("Том %c: файловая система помечена как требующая проверки.", (char)letter);
+                report("Только просмотр: `chkdsk %c:`. Не добавляйте `/f`, пока нет резервной копии.", (char)letter);
+            } else {
+                report("Том %c: флаг ошибки файловой системы не установлен; это не гарантирует исправность флешки.", (char)letter);
+            }
+        } else {
+            report("Том %c: состояние файловой системы прочитать не удалось (код %lu).", (char)letter, GetLastError());
+        }
+        CloseHandle(fs_volume);
+    } else {
+        report("Том %c: для проверки состояния файловой системы не хватило доступа; чтение без повышения прав ограничено.", (char)letter);
+    }
+}
+
+static void diagnose_usb_storage(void) {
+    report("Диагностика USB-накопителей начата. Проверки только для чтения: запись, форматирование и исправление не выполняются.");
+    DWORD drive_mask = GetLogicalDrives();
+    int usb_disks = 0;
+    int denied = 0;
+
+    for (DWORD index = 0; index < 32; ++index) {
+        wchar_t disk_path[64];
+        swprintf(disk_path, sizeof(disk_path)/sizeof(disk_path[0]), L"\\\\.\\PhysicalDrive%lu", index);
+        HANDLE disk = CreateFileW(disk_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  NULL, OPEN_EXISTING, 0, NULL);
+        if (disk == INVALID_HANDLE_VALUE) {
+            if (GetLastError() == ERROR_ACCESS_DENIED) denied++;
+            continue;
+        }
+
+        STORAGE_PROPERTY_QUERY query;
+        ZeroMemory(&query, sizeof(query));
+        query.PropertyId = StorageDeviceProperty;
+        query.QueryType = PropertyStandardQuery;
+        BYTE descriptor_buffer[1024];
+        ZeroMemory(descriptor_buffer, sizeof(descriptor_buffer));
+        DWORD returned = 0;
+        BOOL queried = DeviceIoControl(disk, IOCTL_STORAGE_QUERY_PROPERTY,
+                                       &query, sizeof(query), descriptor_buffer,
+                                       sizeof(descriptor_buffer), &returned, NULL);
+        if (!queried || returned < sizeof(STORAGE_DEVICE_DESCRIPTOR)) {
+            CloseHandle(disk);
+            continue;
+        }
+        STORAGE_DEVICE_DESCRIPTOR *descriptor = (STORAGE_DEVICE_DESCRIPTOR *)descriptor_buffer;
+        if (descriptor->BusType != BusTypeUsb) {
+            CloseHandle(disk);
+            continue;
+        }
+
+        usb_disks++;
+        report("Обнаружен USB-накопитель: физический диск %lu.", index);
+        GET_LENGTH_INFORMATION length_info;
+        if (DeviceIoControl(disk, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0,
+                            &length_info, sizeof(length_info), &returned, NULL)) {
+            report("Ёмкость, сообщённая устройством: %.1f ГБ.",
+                   (double)length_info.Length.QuadPart/(1024.0*1024.0*1024.0));
+        } else {
+            report("Ёмкость диска прочитать не удалось (код %lu).", GetLastError());
+        }
+
+        BOOL writable = DeviceIoControl(disk, IOCTL_DISK_IS_WRITABLE,
+                                        NULL, 0, NULL, 0, &returned, NULL);
+        if (writable) {
+            report("Драйвер не сообщает о защите от записи; пробная запись не выполнялась.");
+        } else {
+            DWORD error = GetLastError();
+            if (error == ERROR_WRITE_PROTECT)
+                report("Устройство сообщает о защите от записи. Никакие атрибуты не менялись.");
+            else
+                report("Статус защиты от записи определить не удалось (код %lu).", error);
+        }
+
+        int matched_volumes = 0;
+        if (drive_mask) {
+            for (DWORD letter_index = 0; letter_index < 26; ++letter_index) {
+                if (!(drive_mask & (1UL << letter_index))) continue;
+                wchar_t letter = (wchar_t)(L'A' + letter_index);
+                wchar_t root[4] = { letter, L':', L'\\', L'\0' };
+                if (GetDriveTypeW(root) == DRIVE_NO_ROOT_DIR) continue;
+                int before = matched_volumes;
+                report_usb_volume(index, letter);
+                // A matching volume is confirmed in the helper's diagnostic log; count roots conservatively by device number.
+                wchar_t volume_path[7] = { L'\\', L'\\', L'.', L'\\', letter, L':', L'\0' };
+                HANDLE volume = CreateFileW(volume_path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                            NULL, OPEN_EXISTING, 0, NULL);
+                if (volume != INVALID_HANDLE_VALUE) {
+                    STORAGE_DEVICE_NUMBER number;
+                    DWORD volume_bytes = 0;
+                    if (DeviceIoControl(volume, IOCTL_STORAGE_GET_DEVICE_NUMBER, NULL, 0,
+                                        &number, sizeof(number), &volume_bytes, NULL) &&
+                        number.DeviceNumber == index) matched_volumes = before + 1;
+                    CloseHandle(volume);
+                }
+            }
+        }
+        if (matched_volumes == 0) {
+            report("Том с буквой диска не найден. В «Управлении дисками» проверьте, виден ли существующий раздел без буквы: ему можно назначить букву; если он RAW или неразмечен и данные важны, не форматируйте и не создавайте новый раздел.");
+        }
+        CloseHandle(disk);
+    }
+
+    if (usb_disks == 0) {
+        report("Физические USB-диски не удалось подтвердить через драйвер Windows.");
+        if (denied) report("Часть дисков недоступна без повышенных прав; при необходимости повторите проверку от имени администратора.");
+        if (drive_mask) {
+            for (DWORD letter_index = 0; letter_index < 26; ++letter_index) {
+                if (!(drive_mask & (1UL << letter_index))) continue;
+                wchar_t letter = (wchar_t)(L'A' + letter_index);
+                wchar_t root[4] = { letter, L':', L'\\', L'\0' };
+                if (GetDriveTypeW(root) == DRIVE_REMOVABLE)
+                    report("Обнаружен съёмный том %c:, но его USB-контроллер подтвердить не удалось.", (char)letter);
+            }
+        }
+        report("Попробуйте другой USB-порт без переходника и другой компьютер. Если устройство нигде не определяется, возможна аппаратная неисправность.");
+    }
+
+    report("Если том читается, сначала скопируйте важные файлы. `chkdsk X:` без `/f` — проверка; `/f` уже изменяет файловую систему.");
+    report("Если Windows показывает RAW/неразмеченную область или файлы важны, не форматируйте и не запускайте `diskpart clean`; сначала остановите запись и займитесь восстановлением данных.");
+    report("Диагностика завершена. WinDiag ничего на USB-накопитель не записывала и не исправляла.");
+}
+
 static int contains_text_ci(const char *text, const char *needle) {
     size_t length = strlen(needle);
     if (!length) return 1;
@@ -496,6 +666,7 @@ static void print_help(const char *program) {
     printf("  %s mark <текст>              добавить отметку о проблеме в текущий журнал\n", program);
     printf("  %s settings notifications   открыть настройки уведомлений Windows\n", program);
     printf("  %s settings updates         открыть настройки Центра обновления Windows\n", program);
+    printf("  %s usb                      проверить USB-накопители (только чтение)\n", program);
     printf("  %s help                     показать эту справку\n\n", program);
     printf("Программа не сбрасывает WMI, не восстанавливает счётчики, не останавливает службы и не отключает обновления.\n");
     printf("Журналы сохраняются в %%LOCALAPPDATA%%\\WinDiag\\logs, отдельный файл на каждый час.\n");
@@ -510,6 +681,7 @@ static void interactive_menu(void) {
         printf("3. Отметить начало тормозов\n");
         printf("4. Открыть настройки уведомлений\n");
         printf("5. Открыть настройки Центра обновления Windows\n");
+        printf("6. Проверить USB-флешку или накопитель\n");
         printf("0. Выход\n> ");
         fflush(stdout);
         if (!fgets(line, sizeof(line), stdin)) return;
@@ -523,6 +695,7 @@ static void interactive_menu(void) {
             if (fgets(line, sizeof(line), stdin)) write_marker(line);
         } else if (choice == 4) open_settings("notifications");
         else if (choice == 5) open_settings("updates");
+        else if (choice == 6) diagnose_usb_storage();
         else printf("Неизвестный пункт меню.\n");
     }
 }
@@ -542,6 +715,10 @@ int main(int argc, char **argv) {
     }
     if (_stricmp(argv[1], "diagnose") == 0 || _stricmp(argv[1], "doctor") == 0) {
         run_diagnostics();
+        return 0;
+    }
+    if (_stricmp(argv[1], "usb") == 0) {
+        diagnose_usb_storage();
         return 0;
     }
     if (_stricmp(argv[1], "watch") == 0) {
