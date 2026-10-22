@@ -132,7 +132,7 @@ static void report_top_processes(void) {
     size_t used = 0;
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) {
-        report("Processes: cannot enumerate (error %lu).", GetLastError());
+        report("Не удалось получить список процессов (код ошибки %lu).", GetLastError());
         return;
     }
 
@@ -154,7 +154,7 @@ static void report_top_processes(void) {
                 item.working_set = counters.WorkingSetSize;
                 int converted = WideCharToMultiByte(CP_UTF8, 0, entry.szExeFile, -1,
                                                     item.name, (int)sizeof(item.name), NULL, NULL);
-                if (!converted) snprintf(item.name, sizeof(item.name), "(name unavailable)");
+                if (!converted) snprintf(item.name, sizeof(item.name), "(имя недоступно)");
 
                 if (used < TOP_COUNT) {
                     top[used++] = item;
@@ -169,35 +169,35 @@ static void report_top_processes(void) {
     CloseHandle(snapshot);
 
     qsort(top, used, sizeof(top[0]), compare_process_memory);
-    report("Largest processes by private memory (read-only snapshot):");
+    report("Процессы с наибольшим объёмом частной памяти (снимок без изменений):");
     for (size_t i = 0; i < used; ++i) {
-        report("  PID %-6lu %-32s private %.0f MB | working set %.0f MB",
+        report("  PID %-6lu %-32s частная память: %.0f МБ | в ОЗУ: %.0f МБ",
                top[i].pid, top[i].name,
                (double)top[i].private_bytes / (1024.0 * 1024.0),
                (double)top[i].working_set / (1024.0 * 1024.0));
     }
-    if (used == 0) report("  No process memory details were accessible.");
+    if (used == 0) report("  Не удалось прочитать данные о памяти процессов.");
 }
 
 static void report_system_snapshot(const char *label) {
     report("--- %s ---", label);
 
     double cpu = 0.0;
-    if (get_cpu_load(&cpu)) report("CPU total: %.1f%% (500 ms sample)", cpu);
-    else report("CPU total: unavailable (error %lu).", GetLastError());
+    if (get_cpu_load(&cpu)) report("Загрузка процессора: %.1f%% (выборка 0,5 с)", cpu);
+    else report("Загрузка CPU недоступна (код ошибки %lu).", GetLastError());
 
     MEMORYSTATUSEX memory;
     ZeroMemory(&memory, sizeof(memory));
     memory.dwLength = sizeof(memory);
     if (GlobalMemoryStatusEx(&memory)) {
         ULONGLONG committed = memory.ullTotalPageFile - memory.ullAvailPageFile;
-        report("RAM: %.2f GB available / %.2f GB physical; commit approx %.2f / %.2f GB",
+        report("Физическая ОЗУ: доступно %.2f ГБ из %.2f ГБ; виртуальная память (commit): занято %.2f ГБ из предела %.2f ГБ",
                (double)memory.ullAvailPhys / (1024.0 * 1024.0 * 1024.0),
                (double)memory.ullTotalPhys / (1024.0 * 1024.0 * 1024.0),
                (double)committed / (1024.0 * 1024.0 * 1024.0),
                (double)memory.ullTotalPageFile / (1024.0 * 1024.0 * 1024.0));
     } else {
-        report("RAM status: unavailable (error %lu).", GetLastError());
+        report("Сведения об ОЗУ недоступны (код ошибки %lu).", GetLastError());
     }
 
     wchar_t windows_dir[MAX_PATH];
@@ -205,12 +205,12 @@ static void report_system_snapshot(const char *label) {
         wchar_t root[4] = { windows_dir[0], L':', L'\\', L'\0' };
         ULARGE_INTEGER free_available, total, total_free;
         if (GetDiskFreeSpaceExW(root, &free_available, &total, &total_free)) {
-            report("Windows drive %c: free %.1f GB / total %.1f GB",
+            report("Диск Windows (%c:): свободно %.1f ГБ из %.1f ГБ",
                    (char)windows_dir[0],
                    (double)free_available.QuadPart / (1024.0 * 1024.0 * 1024.0),
                    (double)total.QuadPart / (1024.0 * 1024.0 * 1024.0));
         } else {
-            report("Disk space: unavailable (error %lu).", GetLastError());
+            report("Не удалось получить сведения о диске (код ошибки %lu).", GetLastError());
         }
     }
 
@@ -236,15 +236,15 @@ static void check_performance_counters(void) {
         ZeroMemory(&value, sizeof(value));
         status = PdhGetFormattedCounterValue(counter, PDH_FMT_LARGE, &counter_type, &value);
         if (status == ERROR_SUCCESS && value.CStatus == ERROR_SUCCESS) {
-            report("Performance counters: OK (English PDH memory counter returned %lld MB).",
+            report("Счётчик производительности работает: доступная память по PDH — %lld МБ.",
                    (long long)value.largeValue);
         } else {
-            report("Performance counters: FAIL (PDH status 0x%08lX).", (unsigned long)status);
+            report("Счётчик производительности НЕ ПРОШЁЛ проверку (код PDH 0x%08lX).", (unsigned long)status);
         }
     } else {
-        report("Performance counters: FAIL (PDH status 0x%08lX).", (unsigned long)status);
-        report("  Suggested next step: from an elevated terminal, run `lodctr /R`, then reboot if Windows requests it.");
-        report("  WinDiag does not rebuild counters automatically.");
+        report("Счётчик производительности НЕ ПРОШЁЛ проверку (код PDH 0x%08lX).", (unsigned long)status);
+        report("  Если счётчики действительно неисправны: откройте CMD от администратора и выполните `lodctr /R`; перезагрузитесь, если Windows попросит.");
+        report("  WinDiag не восстанавливает счётчики автоматически.");
     }
 
     if (query) PdhCloseQuery(query);
@@ -279,30 +279,31 @@ static void check_proxy_configuration(void) {
                                        NULL, &auto_detect, &size) == ERROR_SUCCESS && auto_detect != 0;
 
     if (status == ERROR_SUCCESS) {
-        report("Current-user proxy: %s; proxy address configured: %s; PAC URL configured: %s; auto-detect: %s.",
-               enabled ? "enabled" : "disabled", has_server ? "yes" : "no",
-               has_pac ? "yes" : "no", has_auto_detect ? "yes" : "no");
+        report("Прокси текущего пользователя: %s; адрес задан: %s; PAC-скрипт задан: %s; автообнаружение: %s.",
+               enabled ? "включён" : "выключен", has_server ? "да" : "нет",
+               has_pac ? "да" : "нет", has_auto_detect ? "да" : "нет");
     } else {
-        report("Current-user proxy settings: could not read (registry status %ld).", status);
+        report("Не удалось прочитать настройки прокси пользователя (код реестра %ld).", status);
     }
 
     WINHTTP_PROXY_INFO info;
     ZeroMemory(&info, sizeof(info));
     if (WinHttpGetDefaultProxyConfiguration(&info)) {
-        const char *mode = info.dwAccessType == WINHTTP_ACCESS_TYPE_NAMED_PROXY ? "named proxy" :
-                           info.dwAccessType == WINHTTP_ACCESS_TYPE_NO_PROXY ? "direct" : "system/default";
-        report("WinHTTP proxy: %s. (Address intentionally omitted from the log.)", mode);
+        const char *mode = info.dwAccessType == WINHTTP_ACCESS_TYPE_NAMED_PROXY ? "задан прокси" :
+                           info.dwAccessType == WINHTTP_ACCESS_TYPE_NO_PROXY ? "прямое подключение" : "системные настройки";
+        report("Прокси WinHTTP: %s. Адрес в журнал не записывается.", mode);
         if (info.lpszProxy) GlobalFree(info.lpszProxy);
         if (info.lpszProxyBypass) GlobalFree(info.lpszProxyBypass);
     } else {
-        report("WinHTTP proxy settings: unavailable (error %lu).", GetLastError());
+        report("Настройки прокси WinHTTP недоступны (код ошибки %lu).", GetLastError());
     }
 }
 
 static void scan_event_channel(const char *channel) {
+    const char *display_channel = _stricmp(channel, "System") == 0 ? "Система" : "Приложения";
     HANDLE log = OpenEventLogA(NULL, channel);
     if (!log) {
-        report("Event log %s: unavailable (error %lu).", channel, GetLastError());
+        report("Журнал событий «%s» недоступен (код ошибки %lu).", display_channel, GetLastError());
         return;
     }
 
@@ -330,14 +331,16 @@ static void scan_event_channel(const char *channel) {
                 recent++;
                 if (shown < 20) {
                     const char *source = (const char *)(buffer + offset + sizeof(EVENTLOGRECORD));
+                    const char *display_source = _stricmp(source, "Service Control Manager") == 0
+                                                     ? "Диспетчер управления службами" : source;
                     time_t event_time = (time_t)record->TimeGenerated;
                     struct tm *event_local = localtime(&event_time);
-                    char event_stamp[32] = "unknown time";
+                    char event_stamp[32] = "время неизвестно";
                     if (event_local) strftime(event_stamp, sizeof(event_stamp), "%Y-%m-%d %H:%M:%S", event_local);
-                    report("Event %s: %s | %s | ID %lu | %s (last hour).",
-                           channel,
-                           record->EventType == EVENTLOG_ERROR_TYPE ? "error" : "warning",
-                           source,
+                    report("Журнал «%s»: %s | %s | событие %lu | %s (за последний час).",
+                           display_channel,
+                           record->EventType == EVENTLOG_ERROR_TYPE ? "ошибка" : "предупреждение",
+                           display_source,
                            (unsigned long)(record->EventID & 0xFFFF),
                            event_stamp);
                     shown++;
@@ -348,38 +351,107 @@ static void scan_event_channel(const char *channel) {
     }
 
     DWORD error = GetLastError();
-    if (recent == 0) report("Event %s: no warnings or errors found in the last hour.", channel);
-    else if (recent > shown) report("Event %s: %lu matching warnings/errors total; shown %lu newest records.",
-                                    channel, (unsigned long)recent, (unsigned long)shown);
+    if (recent == 0) report("В журнале «%s» за последний час предупреждений и ошибок нет.", display_channel);
+    else if (recent > shown) report("В журнале «%s» найдено событий с предупреждениями/ошибками: %lu; показаны последние %lu.",
+                                    display_channel, (unsigned long)recent, (unsigned long)shown);
     if (!stop && error != ERROR_HANDLE_EOF && error != ERROR_SUCCESS && error != ERROR_INVALID_PARAMETER) {
-        report("Event %s scan stopped (error %lu).", channel, error);
+        report("Чтение журнала «%s» остановлено (код ошибки %lu).", display_channel, error);
     }
     CloseEventLog(log);
 }
 
+static int contains_text_ci(const char *text, const char *needle) {
+    size_t length = strlen(needle);
+    if (!length) return 1;
+    for (const char *p = text; *p; ++p) {
+        if (_strnicmp(p, needle, length) == 0) return 1;
+    }
+    return 0;
+}
+
 static void check_wmi_repository(void) {
-    report("WMI repository check: running `winmgmt /verifyrepository` (read-only).");
-    int result = _wsystem(L"winmgmt.exe /verifyrepository");
-    report("WMI verification command returned %d. Review the message above; no WMI data was changed.", result);
+    report("Проверка хранилища WMI: запускаю штатную проверку Windows (только чтение).");
+    SECURITY_ATTRIBUTES security = { sizeof(security), NULL, TRUE };
+    HANDLE read_pipe = NULL, write_pipe = NULL;
+    if (!CreatePipe(&read_pipe, &write_pipe, &security, 0)) {
+        report("Не удалось создать канал для ответа WMI (код ошибки %lu).", GetLastError());
+        return;
+    }
+    SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
+
+    char system_dir[MAX_PATH];
+    UINT system_len = GetSystemDirectoryA(system_dir, MAX_PATH);
+    if (system_len == 0 || system_len >= MAX_PATH) {
+        CloseHandle(read_pipe);
+        CloseHandle(write_pipe);
+        report("Не удалось найти системную папку Windows для проверки WMI.");
+        return;
+    }
+    char command_line[MAX_PATH + 64];
+    snprintf(command_line, sizeof(command_line), "\"%s\\wbem\\winmgmt.exe\" /verifyrepository", system_dir);
+
+    STARTUPINFOA startup;
+    PROCESS_INFORMATION process;
+    ZeroMemory(&startup, sizeof(startup));
+    ZeroMemory(&process, sizeof(process));
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESTDHANDLES;
+    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdOutput = write_pipe;
+    startup.hStdError = write_pipe;
+    if (!CreateProcessA(NULL, command_line, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+                        NULL, NULL, &startup, &process)) {
+        DWORD error = GetLastError();
+        CloseHandle(read_pipe);
+        CloseHandle(write_pipe);
+        report("Не удалось запустить проверку WMI (код ошибки %lu).", error);
+        return;
+    }
+    CloseHandle(write_pipe);
+
+    char output[4096];
+    DWORD total = 0, received = 0;
+    while (total < sizeof(output) - 1 &&
+           ReadFile(read_pipe, output + total, (DWORD)(sizeof(output) - 1 - total), &received, NULL) &&
+           received > 0) total += received;
+    output[total] = '\0';
+    CloseHandle(read_pipe);
+
+    WaitForSingleObject(process.hProcess, INFINITE);
+    DWORD exit_code = 1;
+    GetExitCodeProcess(process.hProcess, &exit_code);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+
+    if (contains_text_ci(output, "WMI repository is inconsistent")) {
+        report("Хранилище WMI не согласовано. Не сбрасывайте его автоматически; сначала изучите причину.");
+    } else if (contains_text_ci(output, "WMI repository is consistent")) {
+        report("Хранилище WMI согласовано.");
+    } else if (exit_code == 0) {
+        report("Проверка WMI завершилась без ошибки; текст Windows не распознан.");
+    } else {
+        report("Проверка WMI завершилась с ошибкой. Код процесса: %lu.", exit_code);
+    }
+    report("Код завершения проверки WMI: %lu. Данные WMI не изменялись.", exit_code);
 }
 
 static void run_diagnostics(void) {
-    report("WinDiag diagnostic started. Read-only checks; no system settings are changed.");
-    report_system_snapshot("Current system snapshot");
+    report("WinDiag: диагностика начата. Проверки только для чтения; настройки Windows не меняются.");
+    report_system_snapshot("Состояние системы на момент проверки");
     check_performance_counters();
     check_proxy_configuration();
     check_wmi_repository();
     scan_event_channel("System");
     scan_event_channel("Application");
-    report("Diagnostic finished. Log files are in %%LOCALAPPDATA%%\\WinDiag\\logs.");
+    report("Диагностика завершена. Журналы находятся в %%LOCALAPPDATA%%\\WinDiag\\logs.");
 }
 
 static void run_watch(unsigned long minutes) {
-    report("Monitoring started; samples are written every 60 seconds to hourly log files.");
-    report("Press Ctrl+C to stop. No system settings will be changed.");
+    report("Наблюдение запущено: снимок раз в минуту, файлы журнала разделяются по часам.");
+    report("Для остановки нажмите Ctrl+C. Настройки Windows не меняются.");
     unsigned long elapsed = 0;
     for (;;) {
-        report_system_snapshot("Monitor sample");
+        report_system_snapshot("Снимок наблюдения");
         if (elapsed % 60 == 0) {
             scan_event_channel("System");
             scan_event_channel("Application");
@@ -388,7 +460,7 @@ static void run_watch(unsigned long minutes) {
         Sleep(60000);
         elapsed++;
     }
-    report("Monitoring stopped.");
+    report("Наблюдение остановлено.");
 }
 
 static void open_settings(const char *which) {
@@ -397,13 +469,13 @@ static void open_settings(const char *which) {
     else if (_stricmp(which, "updates") == 0 || _stricmp(which, "update") == 0)
         uri = L"ms-settings:windowsupdate";
     else {
-        report("Unknown settings page. Use: settings notifications | settings updates");
+        report("Неизвестная страница. Используйте: settings notifications | settings updates");
         return;
     }
 
-    report("Opening the Windows Settings page. WinDiag does not toggle notifications or disable updates.");
+    report("Открываю настройки Windows. WinDiag не меняет уведомления и не отключает обновления.");
     HINSTANCE result = ShellExecuteW(NULL, L"open", uri, NULL, NULL, SW_SHOWNORMAL);
-    if ((INT_PTR)result <= 32) report("Could not open Settings (ShellExecute code %ld).", (long)(INT_PTR)result);
+    if ((INT_PTR)result <= 32) report("Не удалось открыть настройки Windows (код ShellExecute %ld).", (long)(INT_PTR)result);
 }
 
 static void write_marker(const char *text) {
@@ -413,32 +485,32 @@ static void write_marker(const char *text) {
         safe[i] = (text[i] == '\r' || text[i] == '\n') ? ' ' : text[i];
     }
     safe[i] = '\0';
-    report("USER MARKER: %s", safe[0] ? safe : "(empty)");
+    report("ОТМЕТКА ПОЛЬЗОВАТЕЛЯ: %s", safe[0] ? safe : "(пусто)");
 }
 
 static void print_help(const char *program) {
-    printf("WinDiag - Windows diagnostics and hourly logs (C / terminal only)\n\n");
-    printf("Usage:\n");
-    printf("  %s diagnose                 Run read-only diagnostics\n", program);
-    printf("  %s watch [minutes]          Log CPU/RAM/disk/processes every minute\n", program);
-    printf("  %s mark <text>              Add a lag/problem marker to the current log\n", program);
-    printf("  %s settings notifications   Open Windows notification settings\n", program);
-    printf("  %s settings updates         Open Windows Update settings\n", program);
-    printf("  %s help                     Show this help\n\n", program);
-    printf("The tool does not reset WMI, rebuild counters, stop services, or disable updates.\n");
-    printf("Logs are stored under %%LOCALAPPDATA%%\\WinDiag\\logs, one file per hour.\n");
+    printf("WinDiag — диагностика Windows и почасовые журналы (C, только терминал)\n\n");
+    printf("Команды:\n");
+    printf("  %s diagnose                 выполнить диагностику без изменений\n", program);
+    printf("  %s watch [минуты]          записывать загрузку процессора, ОЗУ, диска и процессы раз в минуту\n", program);
+    printf("  %s mark <текст>              добавить отметку о проблеме в текущий журнал\n", program);
+    printf("  %s settings notifications   открыть настройки уведомлений Windows\n", program);
+    printf("  %s settings updates         открыть настройки Центра обновления Windows\n", program);
+    printf("  %s help                     показать эту справку\n\n", program);
+    printf("Программа не сбрасывает WMI, не восстанавливает счётчики, не останавливает службы и не отключает обновления.\n");
+    printf("Журналы сохраняются в %%LOCALAPPDATA%%\\WinDiag\\logs, отдельный файл на каждый час.\n");
 }
 
 static void interactive_menu(void) {
     char line[256];
     for (;;) {
-        printf("\nWinDiag - Windows diagnostics\n");
-        printf("1. Run diagnostics\n");
-        printf("2. Start continuous monitoring (Ctrl+C to stop)\n");
-        printf("3. Mark that a slowdown started\n");
-        printf("4. Open notification settings\n");
-        printf("5. Open Windows Update settings\n");
-        printf("0. Exit\n> ");
+        printf("\nWinDiag — диагностика Windows\n");
+        printf("1. Выполнить диагностику\n");
+        printf("2. Начать наблюдение (Ctrl+C — остановка)\n");
+        printf("3. Отметить начало тормозов\n");
+        printf("4. Открыть настройки уведомлений\n");
+        printf("5. Открыть настройки Центра обновления Windows\n");
+        printf("0. Выход\n> ");
         fflush(stdout);
         if (!fgets(line, sizeof(line), stdin)) return;
         int choice = atoi(line);
@@ -446,12 +518,12 @@ static void interactive_menu(void) {
         if (choice == 1) run_diagnostics();
         else if (choice == 2) run_watch(0);
         else if (choice == 3) {
-            printf("What happened? ");
+            printf("Что произошло? ");
             fflush(stdout);
             if (fgets(line, sizeof(line), stdin)) write_marker(line);
         } else if (choice == 4) open_settings("notifications");
         else if (choice == 5) open_settings("updates");
-        else printf("Unknown option.\n");
+        else printf("Неизвестный пункт меню.\n");
     }
 }
 
@@ -478,7 +550,7 @@ int main(int argc, char **argv) {
             char *end = NULL;
             unsigned long parsed = strtoul(argv[2], &end, 10);
             if (!end || *end || parsed > 100000) {
-                fprintf(stderr, "Invalid duration in minutes.\n");
+                fprintf(stderr, "Некорректная длительность в минутах.\n");
                 return 2;
             }
             minutes = parsed;
@@ -488,7 +560,7 @@ int main(int argc, char **argv) {
     }
     if (_stricmp(argv[1], "mark") == 0) {
         if (argc < 3) {
-            fprintf(stderr, "Usage: %s mark <text>\n", argv[0]);
+            fprintf(stderr, "Команды: %s mark <текст>\n", argv[0]);
             return 2;
         }
         char note[1024] = {0};
@@ -509,6 +581,6 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    fprintf(stderr, "Unknown command. Run `%s help`.\n", argv[0]);
+    fprintf(stderr, "Неизвестная команда. Запустите `%s help`.\n", argv[0]);
     return 2;
 }
